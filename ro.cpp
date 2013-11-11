@@ -1,5 +1,4 @@
 #define FUSE_USE_VERSION 26
-#define _GNU_SOURCE
 
 #include <sys/types.h>
 #include <sys/mman.h>
@@ -14,6 +13,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <map>
+#include <list>
+#include <string>
+#include <iostream>
+#include <libgen.h>
+
+using namespace std;
 
 struct memFS_super {
 	uint8_t		res1[3];
@@ -107,11 +113,121 @@ gid_t mount_gid;
 time_t mount_time;
 size_t pagesize;
 
+/*
+ * 	/
+ * 	|
+ * 	|____ file1 { Contents : "First file in root directory using fuse!\n" }
+ * 	|
+ * 	|____ directory1
+ * 			|
+ * 			|____ file2 { Contents : "file2 in directory1 using fuse!\n" }
+ * 			|
+ * 			|____ file3 { Contents : "file3 in directory1 using fuse!\n" }
+ * 
+ */
 
+struct file_node {
+	size_t 		size;
+	uid_t 		uid;
+	gid_t 		gid;
+	time_t 		mtime;
+	mode_t 		mode;
+	nlink_t 	nlink; 
+	string 		path;
+	string 		name;
+	string 		content;
+};
 
-static const char *hello_str = "Hello World!\n";
-static const char *hello_path = "/hello";
-static const char *folder_path = "/arpit";
+map<string , file_node * > fs_file_dir;
+map<string , list<string> > fs_dir;
+
+void print_fs() {
+	
+	cout << "fs_dir : " << endl;
+	
+	typedef map<string, list<string> >::const_iterator MapIterator;
+	
+	for (MapIterator itr = fs_dir.begin(); itr != fs_dir.end(); itr++) {
+		cout << "Key: " << itr->first << endl << "Values:" << endl;
+		typedef list<string>::const_iterator ListIterator;
+		for (ListIterator list_iter = itr->second.begin(); list_iter != itr->second.end(); list_iter++)
+			cout << " " << *list_iter << endl;
+	}
+	
+	
+	cout << "fs_file_dir : " << endl;
+	
+	typedef map<string, file_node * >::const_iterator MapIterator1;
+	
+	for (MapIterator1 itr = fs_file_dir.begin(); itr != fs_file_dir.end(); itr++) {
+		cout << "Key: " << itr->first << endl << "Values:" << endl;
+		cout << " size : " << itr->second->size << endl;
+		cout << " uid : " << itr->second->uid << endl;
+		cout << " gid : " << itr->second->gid << endl;
+		cout << " mtime : " << itr->second->mtime << endl;
+		cout << " mode : " << itr->second->mode << endl;
+		cout << " nlink : " << itr->second->nlink << endl;
+		cout << " path : " << itr->second->path << endl;
+		cout << " name : " << itr->second->name << endl;
+		cout << " content : " << itr->second->content << endl;
+	}
+	
+}
+
+void add_directory( string dir_path ) {
+
+	char * S = new char[dir_path.length() + 1];
+	strcpy(S,dir_path.c_str());
+
+	struct file_node * fn = new struct file_node;
+	fn->size	= 2;
+	fn->uid		= getuid();
+	fn->gid		= getgid();
+	fn->mtime	= time(NULL);
+	fn->mode	= S_IFDIR | 0755;
+	fn->nlink	= 2;
+	fn->path	= dir_path;
+	fn->name	= basename(S);
+	
+	fs_file_dir[dir_path] = fn;
+
+	if ( dir_path != "/" ) {
+		fs_dir[dirname(S)].push_back(dir_path);
+	}
+	
+}
+
+void add_file( string file_path , string file_contents ) {
+
+	char * S = new char[file_path.length() + 1];
+	strcpy(S , file_path.c_str());
+	
+	int size = file_contents.length() + 1;
+	
+	struct file_node * fn = new struct file_node;
+	fn->size	= size-1;
+	fn->uid		= getuid();
+	fn->gid		= getgid();
+	fn->mtime	= time(NULL);
+	fn->mode	= S_IFREG | 0444;
+	fn->nlink	= 1;
+	fn->path	= file_path;
+	fn->name	= basename(S);
+	fn->content	= file_contents;
+	
+	fs_file_dir[file_path] = fn;
+	fs_dir[dirname(S)].push_back(file_path);
+}
+
+void init_fs() {
+	
+	add_directory("/");
+	add_file("/file1" , "First file in root directory using fuse!\n");
+	add_directory("/directory1");
+	add_file("/directory1/file2" , "file2 in directory1 using fuse!\n");
+	add_file("/directory1/file3" , "file3 in directory1 using fuse!\n");
+ 
+}
 
 static void
 memFS_init(const char *dev)
@@ -129,10 +245,9 @@ memFS_init(const char *dev)
 }
 
 static int
-memFS_search_entry(void *data, const char *name, const struct stat *st, off_t offs)
-{
-	printf("memFS_search_entry : \n");
-	struct memFS_search_data *sd = data;
+memFS_search_entry(void *data, const char *name, const struct stat *st, off_t offs) {
+	
+	struct memFS_search_data *sd = (struct memFS_search_data *) data;
 
 	if (strcmp(sd->name, name) != 0)
 		return (0);
@@ -150,25 +265,25 @@ memFS_search_entry(void *data, const char *name, const struct stat *st, off_t of
 static int
 memFS_fuse_getattr(const char *path, struct stat *st) {
 	
-	printf("memFS_fuse_getattr : \n");
-	
 	int return_val = 0;
 	
 	memset(st , 0 , sizeof( struct stat ));
-	if ( strcmp(path , "/") == 0 ) {
-		st->st_mode	 = S_IFDIR | 0755;
-		st->st_nlink = 2;
-	}
-	else if ( strcmp(path , folder_path) == 0 ) {
-		st->st_mode	 = S_IFDIR | 0755;
-		st->st_nlink = 2;
-	}
-	else if (strcmp(path , hello_path) == 0) {
-		st->st_mode = S_IFREG | 0444;
-		st->st_nlink = 1;
-		st->st_size = strlen(hello_str);
+
+	if ( fs_file_dir.find(path) != fs_file_dir.end() ) {
+		/* Path exists */
+		file_node * fn = fs_file_dir[path];
+		
+		st->st_mode		= fn->mode;
+		st->st_nlink	= fn->nlink;
+		st->st_uid		= fn->uid;
+		st->st_gid		= fn->gid;
+		st->st_atime	= fn->mtime;
+		st->st_mtime	= fn->mtime;
+		st->st_ctime	= fn->mtime;
+		st->st_size		= fn->size;
 	}
 	else {
+		/* Path does not exists */
 		return_val = -ENOENT;
 	}
 	
@@ -192,16 +307,22 @@ memFS_fuse_getattr(const char *path, struct stat *st) {
 static int
 memFS_fuse_readdir(const char *path, void *buf,
 		  fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi) {
-			  
-	printf("memFS_read_dir : \n");
-	if( strcmp(path , "/") != 0 ) {
-		return -ENOENT;
-	}
-	
+
 	filler(buf , "." , NULL , 0);
 	filler(buf , ".." , NULL , 0);
-	filler(buf , hello_path + 1 , NULL , 0);
-	filler(buf , folder_path + 1 , NULL , 0);
+	
+	if ( fs_dir.find(path) != fs_dir.end() ) {
+		
+		list<string> list_of_children = fs_dir[path];
+		typedef list<string>::const_iterator ListIterator;
+	
+		for (ListIterator itr = list_of_children.begin(); itr != list_of_children.end(); itr++) {
+			filler( buf, (fs_file_dir[*itr]->name).c_str() , NULL, 0);
+		}
+	}
+	else {
+		return -ENOENT;
+	}
 	
 	return 0;
 }
@@ -217,21 +338,22 @@ memFS_fuse_readdir(const char *path, void *buf,
 static int
 memFS_fuse_open(const char *path, struct fuse_file_info *fi) {
 	
-	printf("memFS_fuse_open : \n");
-	if ( strcmp(path , hello_path) != 0 ) {
-		return -ENOENT;
+	int return_val = 0;
+	
+	if ( fs_file_dir.find(path) == fs_file_dir.end() ) {
+		return_val = -EACCES;
 	}
-
+	
 	/*
 	 * 	O_RDONLY : value is 0
 	 * 	111 & 011 -> 011 -> TRUE so no access
 	 * 	100 & 011 -> 000 -> FALSE 
 	 */
-	if( (fi->flags & 3) != O_RDONLY ) {
+	/*if( (fi->flags & 3) != O_RDONLY ) {
       return -EACCES;
-	}
+	}*/
 	
-	return 0;
+	return return_val;
 }
 
 /*
@@ -245,14 +367,11 @@ static int
 memFS_fuse_read(const char *path, char *buf, size_t size, off_t offset,
 		      struct fuse_file_info *fi) {
 
-	printf("memFS_fuse_read : \n");
 	size_t length = 0;
 	
-	if( strcmp(path, hello_path) != 0) {
+	if ( fs_file_dir.find(path) == fs_file_dir.end() ) {
 		return -ENOENT;
 	}
-	
-	length = strlen(hello_str);
 	
 	/*
 	 * 	if offset = 50 but file has 40
@@ -264,11 +383,14 @@ memFS_fuse_read(const char *path, char *buf, size_t size, off_t offset,
 	 * 		size = size = 20
 	 */
 	
-	if ( offset < length ) {
+	const char * file_content = fs_file_dir[path]->content.c_str();
+	length = fs_file_dir[path]->content.length();
+	
+	if ( (size_t) offset < length ) {
 		if ( offset + size > length ) {
 			size = length - offset;
 		}
-		memcpy( buf , hello_str + offset , size );
+		memcpy( buf , file_content + offset , size );
 	}
 	else {
 		size = 0;
@@ -279,9 +401,8 @@ memFS_fuse_read(const char *path, char *buf, size_t size, off_t offset,
 }
 
 static int
-memFS_opt_args(void *data, const char *arg, int key, struct fuse_args *oargs)
-{
-	printf("memFS_opt_args : \n");
+memFS_opt_args(void *data, const char *arg, int key, struct fuse_args *oargs) {
+	
 	if (key == FUSE_OPT_KEY_NONOPT && !f->dev) {
 		f->dev = strdup(arg);
 		return (0);
@@ -289,25 +410,26 @@ memFS_opt_args(void *data, const char *arg, int key, struct fuse_args *oargs)
 	return (1);
 }
 
-static struct fuse_operations memFS_ops = {
-	.getattr = memFS_fuse_getattr,
-	.readdir = memFS_fuse_readdir,
-	.open	 = memFS_fuse_open,
-	.read 	 = memFS_fuse_read,
+struct fuse_function:fuse_operations {
+	fuse_function() {
+		getattr	= memFS_fuse_getattr;
+		readdir = memFS_fuse_readdir;
+		open	= memFS_fuse_open;
+		read 	= memFS_fuse_read;
+	}
 };
 
-int
-main(int argc, char **argv)
-{
-	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
+static struct fuse_function fuse_ops;
 
-	/*fuse_opt_parse(&args, NULL, NULL, memFS_opt_args);
-
-	if (!f->dev)
-		errx(1, "missing file system parameter");
-
-	memFS_init(f->dev);
-	*/
+int main(int argc, char **argv) {
 	
-	return (fuse_main(args.argc, args.argv, &memFS_ops, NULL));
+	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
+	
+	init_fs();
+
+	/*
+	 * print_fs();
+	 */
+	
+	return (fuse_main(args.argc, args.argv, &fuse_ops, NULL));
 }
