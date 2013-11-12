@@ -123,14 +123,21 @@ size_t pagesize;
  * 			|____ file2 { Contents : "file2 in directory1 using fuse!\n" }
  * 			|
  * 			|____ file3 { Contents : "file3 in directory1 using fuse!\n" }
+ * 			|
+ * 			|____ directory2
+ * 					|
+ * 					|____ file4 { Contents : "file4 in directory2 using fuse!\n" }
  * 
  */
 
 struct file_node {
 	size_t 		size;
+	int			is_dir;
 	uid_t 		uid;
 	gid_t 		gid;
 	time_t 		mtime;
+	time_t 		atime;
+	time_t 		ctime;
 	mode_t 		mode;
 	nlink_t 	nlink; 
 	string 		path;
@@ -143,6 +150,7 @@ map<string , list<string> > fs_dir;
 
 void print_fs() {
 	
+	cout << "-------------------------------------------------------------------------" << endl;
 	cout << "fs_dir : " << endl;
 	
 	typedef map<string, list<string> >::const_iterator MapIterator;
@@ -184,20 +192,25 @@ void add_directory( string dir_path ) {
 	fn->uid		= getuid();
 	fn->gid		= getgid();
 	fn->mtime	= time(NULL);
+	fn->atime	= time(NULL);
+	fn->ctime	= time(NULL);
 	fn->mode	= S_IFDIR | 0755;
 	fn->nlink	= 2;
 	fn->path	= dir_path;
 	fn->name	= basename(S);
+	fn->is_dir	= 1;
 	
 	fs_file_dir[dir_path] = fn;
 
 	if ( dir_path != "/" ) {
 		fs_dir[dirname(S)].push_back(dir_path);
 	}
+
+	fs_dir[dir_path].clear();
 	
 }
 
-void add_file( string file_path , string file_contents ) {
+void add_file( string file_path , string file_contents , mode_t file_mode) {
 
 	char * S = new char[file_path.length() + 1];
 	strcpy(S , file_path.c_str());
@@ -209,11 +222,14 @@ void add_file( string file_path , string file_contents ) {
 	fn->uid		= getuid();
 	fn->gid		= getgid();
 	fn->mtime	= time(NULL);
-	fn->mode	= S_IFREG | 0444;
+	fn->atime	= time(NULL);
+	fn->ctime	= time(NULL);
+	fn->mode	= file_mode | 0775;
 	fn->nlink	= 1;
 	fn->path	= file_path;
 	fn->name	= basename(S);
 	fn->content	= file_contents;
+	fn->is_dir	= 0;
 	
 	fs_file_dir[file_path] = fn;
 	fs_dir[dirname(S)].push_back(file_path);
@@ -222,12 +238,10 @@ void add_file( string file_path , string file_contents ) {
 void init_fs() {
 	
 	add_directory("/");
-	add_file("/file1" , "First file in root directory using fuse!\n");
+	add_file("/file1" , "First file in root directory using fuse!\n" , S_IFREG);
 	add_directory("/directory1");
-	add_file("/directory1/file2" , "file2 in directory1 using fuse!\n");
-	add_file("/directory1/file3" , "file3 in directory1 using fuse!\n");
-	add_directory("/directory1/directory2");
-	add_file("/directory1/directory2/file4" , "file4 in directory2 using fuse!\n");
+	add_file("/directory1/file2" , "file2 in directory1 using fuse!\n" , S_IFREG);
+	add_file("/directory1/file3" , "file3 in directory1 using fuse!\n" , S_IFREG);
  
 }
 
@@ -403,6 +417,256 @@ memFS_fuse_read(const char *path, char *buf, size_t size, off_t offset,
 }
 
 static int
+memFS_fuse_mkdir(const char * path , mode_t mode) {
+	
+	if ( fs_file_dir.find(path) != fs_file_dir.end() ) {
+		return -ENOENT;
+	}
+	add_directory(path);
+	return 0;
+}
+
+static int
+memFS_fuse_rmdir(const char * path) {
+
+    if ( fs_dir.find(path) == fs_dir.end() ) {
+		return -ENOENT;
+	}
+		
+	if ( fs_dir[path].size() != 0 ) {
+		return -ENOTEMPTY;
+	}
+    
+    /*
+     * 	Removing entries from fs_file_dir where sats are saved
+     * 	Removing entries from fs_dir where
+     * 		1. Its children are saved.
+     * 		2. Corresponsing entry from its parent.
+     */
+
+	char * S = new char[ ((string) path).length() + 1];
+	strcpy(S,((string) path).c_str());
+
+	fs_dir[dirname(S)].remove(path);
+    fs_file_dir.erase(path);
+    fs_dir.erase(path);
+
+    return 0;
+}
+
+static int
+memFS_fuse_rename(const char * path , const char * newpath) {
+  
+	/*
+	 * Check if path exists
+	 * Check if parent of newpath exists
+	 * If both are true then
+	 * 		1. If given is a directory then change the key of the fs_dir map
+	 * 		2. Change the key of the fs_file_list map
+	 * 		3. Remove the 'path' from its parent directory and move it to new path
+	 */
+	
+	if ( fs_file_dir.find(path) == fs_file_dir.end() ) {
+		return -ENOENT;
+	}
+	
+	char * S = new char[ ((string) newpath).length() + 1];
+	strcpy(S,((string) newpath).c_str());
+
+	if ( fs_dir.find(dirname(S)) == fs_dir.end() ) {
+		return -ENOENT;
+	}
+	
+	if ( fs_file_dir[path]->is_dir == 1 ) {
+		/*
+		 * 	If source is a directory
+		 */
+		
+		
+		/*
+		 * 	Have to implement dfs so as to rename all the children.
+		 * 	
+		 *	const bool isprefixmatch = ( itr->first.substr(0 , ((string) path).length()) == path);
+		*/
+		
+	}
+	else {
+		
+		char * S = new char[ ((string)path).length() + 1];
+		strcpy(S , ((string)path).c_str());
+		
+		char * T = new char[ ((string)newpath).length() + 1];
+		strcpy(T , ((string)newpath).c_str());
+		
+		file_node * fn = fs_file_dir[path];
+		
+		fn -> name = basename(T);
+		fn -> path = newpath;
+		
+		fs_file_dir.erase(path);
+		fs_file_dir[newpath] = fn;
+		
+		/* 
+		 * 	Change the data in fs_dir as well
+		 * 	Changing parent-child relationship
+		 */
+		 
+		fs_dir[dirname(S)].remove((string)path);
+		fs_dir[dirname(T)].push_back(newpath);
+		
+		free(S);
+		free(T);
+	}
+	
+	return 0;
+}
+
+static int
+memFS_fuse_write(const char *path, const char *buf, size_t size, off_t offset,
+	     struct fuse_file_info *fi) {
+	
+	if ( fs_file_dir.find(path) != fs_file_dir.end() && (fs_file_dir[path]->mode && S_IFMT) == S_IFDIR) {
+		return -ENOENT;
+	}
+
+	if ( fs_file_dir.find(path) == fs_file_dir.end() ) {
+		add_file(path , buf , S_IFREG);
+		fs_file_dir[path]->content = (string) buf;
+	}
+	else {
+		fs_file_dir[path]->content.append((string) buf);
+	}
+	
+	fs_file_dir[path]->size = fs_file_dir[path]->content.length();
+	
+	return size;
+}
+
+static int
+memFS_fuse_truncate(const char *path, off_t newsize) {
+	
+	if ( (fs_file_dir.find(path) == fs_file_dir.end()) || (size_t) newsize > fs_file_dir[path]->content.length() ) {
+		return -ENOENT;
+	}
+	
+	fs_file_dir[path]->content = fs_file_dir[path]->content.substr(0,newsize);
+	
+	return newsize;
+}
+
+static int
+memFS_fuse_symlink(const char *oldpath, const char *newpath) {
+
+	if ( (fs_file_dir.find(newpath) != fs_file_dir.end()) ) {
+		return -EEXIST;
+	}
+	
+	add_file(newpath , oldpath , S_IFLNK);
+
+	return 0;
+}
+
+static int
+memFS_fuse_link(const char *oldpath, const char *newpath) {
+
+	if ( (fs_file_dir.find(newpath) != fs_file_dir.end()) ) {
+		return -EEXIST;
+	}
+	
+	add_file(newpath , "" , S_IFLNK);
+	
+	file_node * fn = fs_file_dir[oldpath];
+	fn->nlink++;
+	fs_file_dir[newpath] = fn;
+	
+	return 0;
+}
+
+static int
+memFS_fuse_readlink(const char *path, char *buf, size_t size) {
+
+	if(size < 0)
+		return -EINVAL;
+	
+	if ( (fs_file_dir.find(path) == fs_file_dir.end()) ) {
+		return -ENOENT;
+	}
+	
+	file_node * fn = fs_file_dir[path];
+	
+	if(S_ISLNK(fn->mode)) {
+		
+		size_t length = fn->content.length();
+		
+		if(length > size)
+			return -EINVAL;
+				
+		memcpy(buf, fn->content.c_str() , length);
+		return 0;
+	
+	} else
+		return -EINVAL;
+	
+	return 0;
+}
+
+/*
+ *	Create a file node
+ *	This is called for creation of all non-directory, non-symlink nodes.
+ * 	If the filesystem defines a create() method, then for regular files 
+ * 	that will be called instead. 
+ */
+static int 
+memFS_fuse_mknod(const char *path , mode_t file_mode, dev_t dev_mode ) {
+
+	add_file(path , "" , file_mode);
+	return 0;
+}
+
+static int
+memFS_fuse_access(const char *path, int mode) {
+
+	if ( (fs_file_dir.find(path) == fs_file_dir.end()) ) {
+		return -ENOENT;
+	}
+	
+	return 0;
+}
+
+static int
+memFS_fuse_unlink(const char *path) {
+	
+	if ( (fs_file_dir.find(path) == fs_file_dir.end()) ) {
+		return -ENOENT;
+	}
+	
+	file_node * fn = fs_file_dir[path];
+	
+	if ( S_ISDIR(fn->mode) ) {
+		return -EISDIR;
+	}
+	
+	char * S = new char[ ((string)path).length() + 1];
+	strcpy(S , ((string)path).c_str());
+	
+	fs_dir[dirname(S)].remove(path);
+	fs_file_dir.erase(path);
+	
+	free(S);
+
+	return 0;
+}
+
+static int
+memFS_fuse_utimens(const char *path, const struct timespec tv[2]) {
+	file_node *fn = fs_file_dir[path];
+	fn->atime = tv[0].tv_sec;
+	fn->mtime = tv[1].tv_sec;
+	return 0;
+}
+
+
+static int
 memFS_opt_args(void *data, const char *arg, int key, struct fuse_args *oargs) {
 	
 	if (key == FUSE_OPT_KEY_NONOPT && !f->dev) {
@@ -414,10 +678,22 @@ memFS_opt_args(void *data, const char *arg, int key, struct fuse_args *oargs) {
 
 struct fuse_function:fuse_operations {
 	fuse_function() {
-		getattr	= memFS_fuse_getattr;
-		readdir = memFS_fuse_readdir;
-		open	= memFS_fuse_open;
-		read 	= memFS_fuse_read;
+		getattr		= memFS_fuse_getattr;
+		readdir 	= memFS_fuse_readdir;
+		open		= memFS_fuse_open;
+		read 		= memFS_fuse_read;
+		mkdir		= memFS_fuse_mkdir;
+		rmdir		= memFS_fuse_rmdir;
+		rename		= memFS_fuse_rename;
+		write		= memFS_fuse_write;
+		truncate	= memFS_fuse_truncate;
+		symlink		= memFS_fuse_symlink;
+		/*link		= memFS_fuse_link;*/
+		readlink	= memFS_fuse_readlink;
+		mknod		= memFS_fuse_mknod;
+		access		= memFS_fuse_access;
+		unlink		= memFS_fuse_unlink;
+		utimens		= memFS_fuse_utimens;
 	}
 };
 
@@ -429,9 +705,8 @@ int main(int argc, char **argv) {
 	
 	init_fs();
 
-	/*
-	 * print_fs();
-	 */
+	/* print_fs(); */
 	
 	return (fuse_main(args.argc, args.argv, &fuse_ops, NULL));
+	
 }
